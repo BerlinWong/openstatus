@@ -3,20 +3,13 @@ import { OpenStatusApiError, openApiErrorResponses } from "@/libs/errors";
 import { trackMiddleware } from "@/libs/middlewares";
 import { createRoute } from "@hono/zod-openapi";
 import { Events } from "@openstatus/analytics";
-import {
-  and,
-  db,
-  eq,
-  inArray,
-  isNotNull,
-  isNull,
-  syncMaintenanceToMonitorInsertMany,
-} from "@openstatus/db";
+import { and, db, eq, inArray, isNotNull, isNull } from "@openstatus/db";
 import { monitor, page, pageSubscriber } from "@openstatus/db/src/schema";
+import { maintenance } from "@openstatus/db/src/schema/maintenances";
 import {
-  maintenance,
-  maintenancesToMonitors,
-} from "@openstatus/db/src/schema/maintenances";
+  maintenancesToPageComponents,
+  pageComponent,
+} from "@openstatus/db/src/schema/page_components";
 import { EmailClient } from "@openstatus/emails";
 import type { maintenancesApi } from "./index";
 import { MaintenanceSchema } from "./schema";
@@ -108,22 +101,31 @@ export function registerPostMaintenance(api: typeof maintenancesApi) {
         .returning()
         .get();
 
-      if (monitorIds?.length) {
-        await tx
-          .insert(maintenancesToMonitors)
-          .values(
-            input.monitorIds.map((monitorId) => ({
-              maintenanceId: newMaintenance.id,
-              monitorId,
-            })),
+      if (monitorIds?.length && newMaintenance.pageId) {
+        // Get page components for the given monitors and page
+        const pageComponents = await tx
+          .select({ id: pageComponent.id })
+          .from(pageComponent)
+          .where(
+            and(
+              inArray(pageComponent.monitorId, monitorIds),
+              eq(pageComponent.pageId, newMaintenance.pageId),
+            ),
           )
-          .run();
-        // Sync to page components
-        await syncMaintenanceToMonitorInsertMany(
-          tx,
-          newMaintenance.id,
-          input.monitorIds,
-        );
+          .all();
+
+        if (pageComponents.length > 0) {
+          // Insert to maintenancesToPageComponents
+          await tx
+            .insert(maintenancesToPageComponents)
+            .values(
+              pageComponents.map((pc) => ({
+                maintenanceId: newMaintenance.id,
+                pageComponentId: pc.id,
+              })),
+            )
+            .run();
+        }
       }
 
       return newMaintenance;
